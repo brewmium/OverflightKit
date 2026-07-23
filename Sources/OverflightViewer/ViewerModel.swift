@@ -109,6 +109,20 @@ final class ViewerModel {
 		let now = Date()
 		rangeEnd = now
 		rangeStart = now.addingTimeInterval(-7 * 86_400)
+		let saved = SiteViewState.load(slug: site.slug)
+		if let bands = saved.enabledBands {
+			enabledBands = Set(bands.compactMap(AltitudeBand.init(rawValue:)))
+		}
+		if let ground = saved.showGround {
+			showGround = ground
+		}
+	}
+
+	private func persistBandSelection() {
+		SiteViewState.update(slug: site.slug) {
+			$0.enabledBands = enabledBands.map(\.rawValue).sorted()
+			$0.showGround = showGround
+		}
 	}
 
 	func start() {
@@ -409,6 +423,7 @@ final class ViewerModel {
 
 	func bandFilterChanged() {
 		rebuildSegments()
+		persistBandSelection()
 	}
 
 	func requestFocus(trackId: String) {

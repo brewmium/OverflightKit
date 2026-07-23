@@ -39,11 +39,23 @@ struct MapPane: NSViewRepresentable {
 		context.coordinator.model = model
 
 		let center = CLLocationCoordinate2D(latitude: model.site.lat, longitude: model.site.lon)
-		let spanM = model.site.radiusNm * Geo.metersPerNm * 2.2
-		map.setRegion(
-			MKCoordinateRegion(center: center, latitudinalMeters: spanM, longitudinalMeters: spanM),
-			animated: false
-		)
+		let saved = SiteViewState.load(slug: model.site.slug)
+		if let lat = saved.centerLat, let lon = saved.centerLon,
+			let dLat = saved.spanLatDeg, let dLon = saved.spanLonDeg {
+			map.setRegion(
+				MKCoordinateRegion(
+					center: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+					span: MKCoordinateSpan(latitudeDelta: dLat, longitudeDelta: dLon)
+				),
+				animated: false
+			)
+		} else {
+			let spanM = model.site.radiusNm * Geo.metersPerNm * 2.2
+			map.setRegion(
+				MKCoordinateRegion(center: center, latitudinalMeters: spanM, longitudinalMeters: spanM),
+				animated: false
+			)
+		}
 
 		let site = SiteAnnotation()
 		site.coordinate = center
@@ -172,6 +184,19 @@ struct MapPane: NSViewRepresentable {
 			let circle = MKCircle(center: coordinate, radius: radiusM)
 			map.addOverlay(circle, level: .aboveLabels)
 			parcelCircle = circle
+		}
+
+		/// Fires at the end of every pan/zoom (and after programmatic region
+		/// changes) — remember where this site's map was left.
+		func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+			guard let slug = model?.site.slug else { return }
+			let region = mapView.region
+			SiteViewState.update(slug: slug) {
+				$0.centerLat = region.center.latitude
+				$0.centerLon = region.center.longitude
+				$0.spanLatDeg = region.span.latitudeDelta
+				$0.spanLonDeg = region.span.longitudeDelta
+			}
 		}
 
 		func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
