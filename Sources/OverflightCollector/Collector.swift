@@ -154,7 +154,7 @@ struct CollectorLoop: Sendable {
 			}
 
 			let now = Int64(Date().timeIntervalSince1970)
-			if now - lastMetarAttempt >= 3600 {
+			if !site.metarStation.isEmpty, now - lastMetarAttempt >= 3600 {
 				do {
 					let (sample, raw) = try await MetarClient.fetchLatest(station: site.metarStation, session: session)
 					try await store.record(metarTs: sample.ts, station: site.metarStation, altimHpa: sample.altimHpa, raw: raw)
