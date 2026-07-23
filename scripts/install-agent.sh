@@ -16,28 +16,55 @@ BIN_DIR="$(swift build -c release --product OverflightCollector --show-bin-path)
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/log" "$HOME/Library/LaunchAgents"
 
 # Unload everything that might hold the old binary open, including the
-# pre-multi-site unsuffixed label.
+# pre-multi-site unsuffixed label. Remember what was running so a
+# single-site install restarts the rest afterwards.
+RUNNING=""
 launchctl bootout "gui/$(id -u)/com.overflightkit.collector" 2>/dev/null || true
 for existing in "$HOME"/Library/LaunchAgents/com.overflightkit.collector.*.plist; do
 	[ -e "$existing" ] || continue
-	launchctl bootout "gui/$(id -u)/$(basename "$existing" .plist)" 2>/dev/null || true
+	NAME="$(basename "$existing" .plist)"
+	launchctl bootout "gui/$(id -u)/$NAME" 2>/dev/null || true
+	RUNNING="$RUNNING ${NAME#com.overflightkit.collector.}"
 done
 rm -f "$HOME/Library/LaunchAgents/com.overflightkit.collector.plist"
 
 cp "$BIN_DIR/OverflightCollector" "$INSTALL_DIR/bin/"
 
 if [ $# -gt 0 ]; then
-	SLUGS="$*"
+	SLUGS="$* $RUNNING"
 else
 	SLUGS="$("$INSTALL_DIR/bin/OverflightCollector" --list-sites | cut -f1)"
 fi
+SLUGS="$(printf '%s\n' $SLUGS | sort -u)"
+
+# bootout is asynchronous: bootstrapping a label that is still tearing down
+# fails with EIO, so wait for the old instance to vanish and retry.
+bootstrap_agent() {
+	LABEL="$1"
+	PLIST="$2"
+	i=0
+	while launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; do
+		i=$((i + 1))
+		[ $i -ge 10 ] && break
+		sleep 1
+	done
+	i=0
+	while ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; do
+		i=$((i + 1))
+		if [ $i -ge 5 ]; then
+			echo "failed to bootstrap $LABEL" >&2
+			return 1
+		fi
+		sleep 1
+	done
+}
 
 for SLUG in $SLUGS; do
 	LABEL="com.overflightkit.collector.$SLUG"
 	PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 	sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" -e "s|__SLUG__|$SLUG|g" \
 		launchd/com.overflightkit.collector.plist.template > "$PLIST_DEST"
-	launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
+	bootstrap_agent "$LABEL" "$PLIST_DEST"
 	echo "started $LABEL -> log/$SLUG.log"
 done
 

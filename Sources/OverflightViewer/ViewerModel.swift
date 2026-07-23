@@ -53,6 +53,8 @@ final class ViewerModel {
 	private(set) var store: Store?
 	private(set) var loadError: String?
 	private(set) var loading = false
+	/// True when the site's database doesn't exist yet — no collector has run.
+	private(set) var dbMissing = false
 
 	// Filters
 	var rangeStart: Date
@@ -159,7 +161,12 @@ final class ViewerModel {
 			loadError = nil
 			lastLoaded = Date()
 		} catch {
-			loadError = "\(error)"
+			if case OverflightError.notFound = error {
+				dbMissing = true
+				loadError = "no data yet — the collector for this site isn't running"
+			} else {
+				loadError = "\(error)"
+			}
 			store = nil
 		}
 	}
@@ -204,7 +211,12 @@ final class ViewerModel {
 			loadError = nil
 			lastLoaded = Date()
 		} catch {
-			loadError = "\(error)"
+			if case OverflightError.notFound = error {
+				dbMissing = true
+				loadError = "no data yet — the collector for this site isn't running"
+			} else {
+				loadError = "\(error)"
+			}
 			store = nil
 		}
 	}
@@ -213,7 +225,24 @@ final class ViewerModel {
 		if let store { return store }
 		let s = try Store(path: site.expandedDbPath, readOnly: true)
 		store = s
+		dbMissing = false
 		return s
+	}
+
+	/// Install and start this site's LaunchAgent from the viewer; the regular
+	/// 10s refresh picks up the database once the first polls land.
+	func startCollector() {
+		dbMissing = false
+		loadError = "starting collector..."
+		Task {
+			do {
+				try await AgentInstaller.startCollector(site: site)
+				loadError = "collector starting — first polls land within a few seconds"
+			} catch {
+				dbMissing = true
+				loadError = "\(error)"
+			}
+		}
 	}
 
 	private func finishRebuild(store: Store, from: Int64, to: Int64) async throws {

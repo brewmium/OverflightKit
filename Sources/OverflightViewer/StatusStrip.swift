@@ -56,6 +56,11 @@ struct StatusStrip: View {
 					.foregroundStyle(Viz.statusCritical)
 					.lineLimit(1)
 			}
+			if model.dbMissing {
+				Button("Start collector") { model.startCollector() }
+					.controlSize(.small)
+					.help("Install and start this site's background collector agent")
+			}
 			Spacer()
 			if model.loading {
 				ProgressView()
