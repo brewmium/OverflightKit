@@ -23,6 +23,19 @@ struct TrackHead: Identifiable, Sendable {
 	let cls: SegmentClass
 }
 
+/// One currently-active aircraft (heard within the last two minutes),
+/// for the "Active now" panel.
+struct ActiveFlight: Identifiable, Sendable {
+	let id: String
+	let name: String
+	let typeCode: String?
+	let aglFt: Double?
+	let altSource: AltitudeSource
+	let onGround: Bool
+	let gsKt: Double?
+	let lastTs: Int64
+}
+
 @MainActor
 @Observable
 final class ViewerModel {
@@ -35,8 +48,6 @@ final class ViewerModel {
 	var rangeStart: Date
 	var rangeEnd: Date
 	var rangePreset: RangePreset = .week
-	/// Guard so programmatic date writes don't re-trigger the custom-range path.
-	private(set) var settingDatesProgrammatically = false
 	var enabledBands: Set<AltitudeBand> = Set(AltitudeBand.allCases)
 	var showGround = false
 
@@ -54,6 +65,7 @@ final class ViewerModel {
 	private(set) var pollStats: PollStats?
 	private(set) var segmentsByClass: [SegmentClass: [[CLLocationCoordinate2D]]] = [:]
 	private(set) var trackHeads: [TrackHead] = []
+	private(set) var activeFlights: [ActiveFlight] = []
 	private(set) var mapRevision = 0
 	private(set) var lastLoaded: Date?
 
@@ -96,7 +108,6 @@ final class ViewerModel {
 			guard let store else { return }
 
 			if rangePreset != .custom {
-				settingDatesProgrammatically = true
 				rangeEnd = Date()
 				switch rangePreset {
 				case .day: rangeStart = rangeEnd.addingTimeInterval(-86_400)
@@ -108,7 +119,6 @@ final class ViewerModel {
 					}
 				case .custom: break
 				}
-				settingDatesProgrammatically = false
 			}
 
 			let from = Int64(rangeStart.timeIntervalSince1970)
@@ -195,18 +205,28 @@ final class ViewerModel {
 		mapRevision += 1
 	}
 
-	/// Head markers for tracks still receiving observations — last point within
-	/// two minutes of the newest poll. Historical tracks end without a head so
-	/// weeks of accumulated lines don't sprout hundreds of triangles.
+	/// Head markers and the "Active now" list for tracks still receiving
+	/// observations — last point within two minutes of the newest poll.
+	/// Historical tracks end without a head so weeks of accumulated lines
+	/// don't sprout hundreds of triangles. Heads respect the band filters;
+	/// the active list deliberately does not, so it always answers "what's
+	/// up there right now."
 	private func rebuildTrackHeads() {
 		guard let nowTs = pollStats?.lastTs else {
 			trackHeads = []
+			activeFlights = []
 			return
 		}
 		let cutoff = nowTs - 120
 		var heads: [TrackHead] = []
+		var active: [ActiveFlight] = []
 		for t in tracks {
 			guard let last = t.points.last, last.ts >= cutoff else { continue }
+			active.append(ActiveFlight(
+				id: t.id, name: t.displayName, typeCode: t.typeCode,
+				aglFt: last.aglFt, altSource: last.altSource, onGround: last.onGround,
+				gsKt: last.gsKt, lastTs: last.ts
+			))
 			let cls: SegmentClass
 			if last.onGround {
 				cls = .ground
@@ -224,6 +244,13 @@ final class ViewerModel {
 			heads.append(TrackHead(id: t.id, lat: last.lat, lon: last.lon, headingDeg: heading, cls: cls))
 		}
 		trackHeads = heads
+		// Lowest traffic first — that's the interesting end; ground and
+		// unknown-altitude at the bottom.
+		activeFlights = active.sorted { a, b in
+			let ka = a.onGround ? 2.0e9 : (a.aglFt ?? 1.0e9)
+			let kb = b.onGround ? 2.0e9 : (b.aglFt ?? 1.0e9)
+			return ka < kb
+		}
 	}
 
 	private func isEnabled(_ cls: SegmentClass) -> Bool {
@@ -276,8 +303,11 @@ final class ViewerModel {
 		Task { await reload() }
 	}
 
-	func customRangeEdited() {
-		guard !settingDatesProgrammatically else { return }
+	/// Called only from the date pickers' binding setters, so programmatic
+	/// writes during reload never masquerade as a user edit.
+	func setCustomRange(start: Date? = nil, end: Date? = nil) {
+		if let start { rangeStart = start }
+		if let end { rangeEnd = end }
 		rangePreset = .custom
 		Task { await reload() }
 	}

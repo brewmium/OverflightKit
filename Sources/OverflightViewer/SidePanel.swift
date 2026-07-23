@@ -7,6 +7,18 @@ struct SidePanel: View {
 	var body: some View {
 		@Bindable var model = model
 		Form {
+			Section("Active now") {
+				if model.activeFlights.isEmpty {
+					Text("Nothing in the air right now")
+						.font(.caption)
+						.foregroundStyle(.secondary)
+				} else {
+					ForEach(model.activeFlights) { flight in
+						activeRow(flight)
+					}
+				}
+			}
+
 			Section("Date range") {
 				Picker("Preset", selection: Binding(
 					get: { model.rangePreset },
@@ -22,10 +34,14 @@ struct SidePanel: View {
 				}
 				.pickerStyle(.segmented)
 				.labelsHidden()
-				DatePicker("From", selection: $model.rangeStart)
-					.onChange(of: model.rangeStart) { model.customRangeEdited() }
-				DatePicker("To", selection: $model.rangeEnd)
-					.onChange(of: model.rangeEnd) { model.customRangeEdited() }
+				DatePicker("From", selection: Binding(
+					get: { model.rangeStart },
+					set: { model.setCustomRange(start: $0) }
+				))
+				DatePicker("To", selection: Binding(
+					get: { model.rangeEnd },
+					set: { model.setCustomRange(end: $0) }
+				))
 			}
 
 			Section("Altitude bands (ft AGL)") {
@@ -189,6 +205,46 @@ struct SidePanel: View {
 			Text(parts.isEmpty ? "-" : parts.joined(separator: ", "))
 				.font(.caption)
 				.multilineTextAlignment(.trailing)
+		}
+	}
+
+	private func activeRow(_ flight: ActiveFlight) -> some View {
+		let swatch: Color
+		let alt: String
+		if flight.onGround {
+			swatch = Viz.ground
+			alt = "on ground"
+		} else if let agl = flight.aglFt {
+			swatch = Viz.chartBand(AltitudeBand.classify(aglFt: agl))
+			alt = "\(Int(agl.rounded())) ft AGL (\(flight.altSource.label))"
+		} else {
+			swatch = Viz.ground
+			alt = "altitude unknown"
+		}
+		let age = max(0, Int64(Date().timeIntervalSince1970) - flight.lastTs)
+		var detail = alt
+		if let gs = flight.gsKt {
+			detail += " - \(Int(gs.rounded())) kt"
+		}
+		detail += " - \(age < 60 ? "\(age)s" : "\(age / 60)m") ago"
+		return HStack(spacing: 6) {
+			Circle()
+				.fill(swatch)
+				.frame(width: 8, height: 8)
+			VStack(alignment: .leading, spacing: 1) {
+				HStack {
+					Text(flight.name)
+						.font(.caption.bold())
+					if let type = flight.typeCode {
+						Text(type)
+							.font(.caption2)
+							.foregroundStyle(.secondary)
+					}
+				}
+				Text(detail)
+					.font(.caption2)
+					.foregroundStyle(.secondary)
+			}
 		}
 	}
 
