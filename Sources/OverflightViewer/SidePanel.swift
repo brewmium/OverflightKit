@@ -7,7 +7,7 @@ struct SidePanel: View {
 	var body: some View {
 		@Bindable var model = model
 		Form {
-			Section("Active now") {
+			Section {
 				if model.activeFlights.isEmpty {
 					Text("Nothing in the air right now")
 						.font(.caption)
@@ -19,6 +19,18 @@ struct SidePanel: View {
 							.onTapGesture { model.requestFocus(trackId: flight.id) }
 							.help("Show this aircraft on the map")
 					}
+				}
+			} header: {
+				HStack {
+					Text("Active now")
+					Spacer()
+					Button {
+						model.requestRecenter()
+					} label: {
+						Image(systemName: "location.viewfinder")
+					}
+					.buttonStyle(.borderless)
+					.help("Recenter the map on the field")
 				}
 			}
 

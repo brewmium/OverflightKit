@@ -65,6 +65,15 @@ struct MapPane: NSViewRepresentable {
 			coord.handledFocusSeq = focus.seq
 			coord.focus(map, trackId: focus.trackId)
 		}
+		if model.recenterSeq != coord.handledRecenterSeq {
+			coord.handledRecenterSeq = model.recenterSeq
+			let center = CLLocationCoordinate2D(latitude: model.site.lat, longitude: model.site.lon)
+			let spanM = model.site.radiusNm * Geo.metersPerNm * 2.2
+			map.setRegion(
+				MKCoordinateRegion(center: center, latitudinalMeters: spanM, longitudinalMeters: spanM),
+				animated: true
+			)
+		}
 	}
 
 	@MainActor
@@ -72,6 +81,7 @@ struct MapPane: NSViewRepresentable {
 		var model: ViewerModel?
 		var overlayRevision = -1
 		var handledFocusSeq = 0
+		var handledRecenterSeq = 0
 		private var parcelAnnotation: ParcelAnnotation?
 		private var parcelCircle: MKCircle?
 		private var lastParcel: (lat: Double, lon: Double, radiusM: Double) = (.nan, .nan, .nan)

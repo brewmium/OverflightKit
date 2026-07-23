@@ -81,6 +81,7 @@ final class ViewerModel {
 	private(set) var mapRevision = 0
 	private(set) var lastLoaded: Date?
 	private(set) var focusRequest: FocusRequest?
+	private(set) var recenterSeq = 0
 
 	var autoRefresh = true
 	private var refreshTask: Task<Void, Never>?
@@ -413,6 +414,10 @@ final class ViewerModel {
 	func requestFocus(trackId: String) {
 		focusSeq += 1
 		focusRequest = FocusRequest(trackId: trackId, seq: focusSeq)
+	}
+
+	func requestRecenter() {
+		recenterSeq += 1
 	}
 
 	// MARK: - Parcel (auto-saved)

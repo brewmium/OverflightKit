@@ -233,6 +233,11 @@ struct SitePickerView: View {
 		do {
 			try updated.save()
 			config = updated
+			// Start collecting immediately; if this can't (collector binary not
+			// installed yet), the new window's Start collector button covers it.
+			Task {
+				try? await AgentInstaller.startCollector(site: site)
+			}
 			onPick(site, updated)
 		} catch {
 			formError = "saving config: \(error)"

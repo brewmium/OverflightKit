@@ -19,6 +19,7 @@ func makeSignalSource(_ sig: Int32, cancelling task: Task<Void, Never>) -> Dispa
 struct PollOutcome: Sendable {
 	var record: PollRecord
 	var aircraft: [Aircraft]
+	var retryAfterS: Double?
 }
 
 struct CollectorLoop: Sendable {
@@ -39,10 +40,11 @@ struct CollectorLoop: Sendable {
 
 	func pollSource(named name: String) async -> PollOutcome {
 		let ts = Int64(Date().timeIntervalSince1970)
-		func failed(_ status: Int?, _ error: String, _ ms: Int?) -> PollOutcome {
+		func failed(_ status: Int?, _ error: String, _ ms: Int?, retryAfterS: Double? = nil) -> PollOutcome {
 			PollOutcome(
 				record: PollRecord(ts: ts, source: name, httpStatus: status, error: error, aircraftCount: 0, latencyMs: ms),
-				aircraft: []
+				aircraft: [],
+				retryAfterS: retryAfterS
 			)
 		}
 		guard let base = Config.baseURL(forSource: name),
@@ -54,9 +56,11 @@ struct CollectorLoop: Sendable {
 		do {
 			let (data, resp) = try await session.data(from: url)
 			let ms = Int(Date().timeIntervalSince(start) * 1000)
-			let status = (resp as? HTTPURLResponse)?.statusCode
+			let http = resp as? HTTPURLResponse
+			let status = http?.statusCode
 			guard status == 200 else {
-				return failed(status, "http \(status.map(String.init) ?? "?")", ms)
+				let retryAfter = http?.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+				return failed(status, "http \(status.map(String.init) ?? "?")", ms, retryAfterS: retryAfter)
 			}
 			do {
 				let decoded = try JSONDecoder().decode(PointResponse.self, from: data)
@@ -105,6 +109,13 @@ struct CollectorLoop: Sendable {
 			lastMetarAttempt = ts
 		}
 
+		// Multiple site collectors share this machine's IP; a deterministic
+		// per-slug phase offset keeps them interleaved instead of stampeding
+		// the aggregator together (which is what draws 429s at startup).
+		let stableHash = site.slug.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0x7fff_ffff }
+		let phaseS = Double(stableHash % 1000) / 1000 * config.pollIntervalS
+		try? await Task.sleep(for: .seconds(phaseS))
+
 		while !Task.isCancelled {
 			let probing = !activePrimary && pollsUntilPrimaryProbe <= 0
 			let sourceName = (activePrimary || probing) ? config.primarySource : config.fallbackSource
@@ -134,6 +145,10 @@ struct CollectorLoop: Sendable {
 				} else {
 					failStreak += 1
 					backoffS = min(backoffS == 0 ? config.pollIntervalS * 2 : backoffS * 2, 300)
+					if let ra = outcome.retryAfterS {
+						// The server told us when to come back; believe it.
+						backoffS = min(max(ra, backoffS), 300)
+					}
 					if activePrimary, failStreak >= 3 {
 						activePrimary = false
 						pollsUntilPrimaryProbe = 30
