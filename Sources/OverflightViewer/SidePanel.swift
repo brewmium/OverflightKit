@@ -1,0 +1,225 @@
+import SwiftUI
+import OverflightCore
+
+struct SidePanel: View {
+	@Environment(ViewerModel.self) private var model
+
+	var body: some View {
+		@Bindable var model = model
+		Form {
+			Section("Date range") {
+				Picker("Preset", selection: Binding(
+					get: { model.rangePreset },
+					set: { model.setPreset($0) }
+				)) {
+					Text("24h").tag(RangePreset.day)
+					Text("7d").tag(RangePreset.week)
+					Text("30d").tag(RangePreset.month)
+					Text("All").tag(RangePreset.all)
+					if model.rangePreset == .custom {
+						Text("Custom").tag(RangePreset.custom)
+					}
+				}
+				.pickerStyle(.segmented)
+				.labelsHidden()
+				DatePicker("From", selection: $model.rangeStart)
+					.onChange(of: model.rangeStart) { model.customRangeEdited() }
+				DatePicker("To", selection: $model.rangeEnd)
+					.onChange(of: model.rangeEnd) { model.customRangeEdited() }
+			}
+
+			Section("Altitude bands (ft AGL)") {
+				ForEach(AltitudeBand.allCases, id: \.self) { band in
+					Toggle(isOn: Binding(
+						get: { model.enabledBands.contains(band) },
+						set: { on in
+							if on {
+								model.enabledBands.insert(band)
+							} else {
+								model.enabledBands.remove(band)
+							}
+							model.bandFilterChanged()
+						}
+					)) {
+						HStack(spacing: 6) {
+							RoundedRectangle(cornerRadius: 2)
+								.fill(Viz.chartBand(band))
+								.frame(width: 12, height: 12)
+							Text(band.label)
+						}
+					}
+				}
+				Toggle(isOn: Binding(
+					get: { model.showGround },
+					set: { on in
+						model.showGround = on
+						model.bandFilterChanged()
+					}
+				)) {
+					HStack(spacing: 6) {
+						RoundedRectangle(cornerRadius: 2)
+							.fill(Viz.ground)
+							.frame(width: 12, height: 12)
+						Text("Ground traffic")
+					}
+				}
+			}
+
+			Section("Parcel") {
+				LabeledContent("Center") {
+					Text(String(format: "%.5f, %.5f", model.parcelLat, model.parcelLon))
+						.font(.caption.monospacedDigit())
+				}
+				Text("Drag the orange marker on the map to move it.")
+					.font(.caption2)
+					.foregroundStyle(.secondary)
+				LabeledContent("Radius") {
+					Text("\(Int(model.parcelRadiusM)) m")
+						.font(.caption.monospacedDigit())
+				}
+				Slider(
+					value: $model.parcelRadiusM,
+					in: 50...3000,
+					onEditingChanged: { editing in
+						if !editing {
+							model.recomputeStats()
+						}
+					}
+				)
+				HStack {
+					Button("Reset to field") { model.resetParcelToSite() }
+					Button("Save to config") { model.saveParcelToConfig() }
+				}
+				.controlSize(.small)
+			}
+
+			Section("Overflights") {
+				HStack(alignment: .firstTextBaseline, spacing: 8) {
+					Text("\(model.visibleOverflights.count)")
+						.font(.system(size: 28, weight: .semibold))
+					Text("tracks through cylinder")
+						.font(.caption)
+						.foregroundStyle(.secondary)
+				}
+				BarChartView(title: "By hour of day (\(model.config.timezone))", data: hourData)
+				BarChartView(title: "By altitude band at closest approach (ft AGL)", data: bandData)
+				if model.bandHist.unknownCount > 0 {
+					Text("\(model.bandHist.unknownCount) overflight(s) had no usable altitude at closest approach")
+						.font(.caption2)
+						.foregroundStyle(Viz.mutedInk)
+				}
+			}
+
+			Section("Coverage") {
+				if let cov = model.coverage {
+					LabeledContent("Below 2,000 ft AGL") {
+						Text("\(cov.below2000) obs (\(String(format: "%.1f%%", cov.fractionBelow2000 * 100)))")
+							.font(.caption.monospacedDigit())
+					}
+					LabeledContent("Min AGL within 5 nm") {
+						if let minAgl = cov.minAglWithin5nmFt {
+							Text("\(Int(minAgl.rounded())) ft (\(cov.minAglSource?.label ?? "?"))")
+								.font(.caption.monospacedDigit())
+						} else {
+							Text("none seen")
+								.font(.caption)
+						}
+					}
+					altitudeSourcesRow(cov)
+					if !cov.patternVisible {
+						Label(
+							"No observations below 2,000 ft AGL in this window — the aggregator likely cannot see pattern traffic here, so this data cannot answer the overflight question at pattern altitudes.",
+							systemImage: "exclamationmark.triangle.fill"
+						)
+						.font(.caption)
+						.foregroundStyle(Viz.statusCritical)
+					}
+				} else {
+					Text("No data loaded")
+						.font(.caption)
+						.foregroundStyle(.secondary)
+				}
+			}
+
+			Section("Recent overflights") {
+				if model.visibleOverflights.isEmpty {
+					Text("None in range")
+						.font(.caption)
+						.foregroundStyle(.secondary)
+				} else {
+					ForEach(model.visibleOverflights.suffix(30).reversed()) { of in
+						overflightRow(of)
+					}
+				}
+			}
+		}
+		.formStyle(.grouped)
+	}
+
+	private var hourData: [BarChartView.BarDatum] {
+		model.hourHist.enumerated().map { hour, count in
+			BarChartView.BarDatum(
+				id: hour,
+				axisLabel: hour % 3 == 0 ? String(format: "%02d", hour) : nil,
+				value: count,
+				color: Viz.seriesBlue
+			)
+		}
+	}
+
+	private var bandData: [BarChartView.BarDatum] {
+		AltitudeBand.allCases.map { band in
+			BarChartView.BarDatum(
+				id: band.rawValue,
+				axisLabel: band.label,
+				value: model.bandHist.counts[band.rawValue],
+				color: Viz.chartBand(band)
+			)
+		}
+	}
+
+	private func altitudeSourcesRow(_ cov: CoverageDiagnostic) -> some View {
+		let total = cov.sourceCounts.values.reduce(0, +)
+		let order: [AltitudeSource] = [.geometric, .baroCorrected, .baroUncorrected, .unknown]
+		let parts = order.compactMap { src -> String? in
+			guard total > 0, let n = cov.sourceCounts[src], n > 0 else { return nil }
+			return "\(src.label) \(String(format: "%.0f%%", Double(n) / Double(total) * 100))"
+		}
+		return LabeledContent("Altitude sources") {
+			Text(parts.isEmpty ? "-" : parts.joined(separator: ", "))
+				.font(.caption)
+				.multilineTextAlignment(.trailing)
+		}
+	}
+
+	private func overflightRow(_ of: Overflight) -> some View {
+		let fmt = DateFormatter()
+		fmt.dateFormat = "MM-dd HH:mm"
+		fmt.timeZone = model.config.timeZone
+		let time = fmt.string(from: Date(timeIntervalSince1970: Double(of.closestPoint.ts)))
+		let alt: String
+		if let agl = of.closestPoint.aglFt {
+			alt = "\(Int(agl.rounded())) ft AGL (\(of.closestPoint.altSource.label))"
+		} else {
+			alt = "altitude unknown"
+		}
+		return VStack(alignment: .leading, spacing: 1) {
+			HStack {
+				Text(of.track.displayName)
+					.font(.caption.bold())
+				if let type = of.track.typeCode {
+					Text(type)
+						.font(.caption2)
+						.foregroundStyle(.secondary)
+				}
+				Spacer()
+				Text(time)
+					.font(.caption2.monospacedDigit())
+					.foregroundStyle(.secondary)
+			}
+			Text("closest \(Int(of.closestDistanceM.rounded())) m - \(alt)")
+				.font(.caption2)
+				.foregroundStyle(.secondary)
+		}
+	}
+}
