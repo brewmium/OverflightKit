@@ -13,6 +13,16 @@ enum RangePreset: Hashable {
 	case day, week, month, all, custom
 }
 
+/// The leading tip of a still-active track: where the aircraft is right now,
+/// and which way it's pointed.
+struct TrackHead: Identifiable, Sendable {
+	let id: String
+	let lat: Double
+	let lon: Double
+	let headingDeg: Double?
+	let cls: SegmentClass
+}
+
 @MainActor
 @Observable
 final class ViewerModel {
@@ -43,6 +53,7 @@ final class ViewerModel {
 	private(set) var coverage: CoverageDiagnostic?
 	private(set) var pollStats: PollStats?
 	private(set) var segmentsByClass: [SegmentClass: [[CLLocationCoordinate2D]]] = [:]
+	private(set) var trackHeads: [TrackHead] = []
 	private(set) var mapRevision = 0
 	private(set) var lastLoaded: Date?
 
@@ -180,7 +191,39 @@ final class ViewerModel {
 			flush()
 		}
 		segmentsByClass = out
+		rebuildTrackHeads()
 		mapRevision += 1
+	}
+
+	/// Head markers for tracks still receiving observations — last point within
+	/// two minutes of the newest poll. Historical tracks end without a head so
+	/// weeks of accumulated lines don't sprout hundreds of triangles.
+	private func rebuildTrackHeads() {
+		guard let nowTs = pollStats?.lastTs else {
+			trackHeads = []
+			return
+		}
+		let cutoff = nowTs - 120
+		var heads: [TrackHead] = []
+		for t in tracks {
+			guard let last = t.points.last, last.ts >= cutoff else { continue }
+			let cls: SegmentClass
+			if last.onGround {
+				cls = .ground
+			} else if let agl = last.aglFt {
+				cls = .band(AltitudeBand.classify(aglFt: agl).rawValue)
+			} else {
+				cls = .unknownAlt
+			}
+			guard isEnabled(cls) else { continue }
+			var heading = last.trackDeg
+			if heading == nil, t.points.count >= 2 {
+				let prev = t.points[t.points.count - 2]
+				heading = Geo.bearingDeg(lat1: prev.lat, lon1: prev.lon, lat2: last.lat, lon2: last.lon)
+			}
+			heads.append(TrackHead(id: t.id, lat: last.lat, lon: last.lon, headingDeg: heading, cls: cls))
+		}
+		trackHeads = heads
 	}
 
 	private func isEnabled(_ cls: SegmentClass) -> Bool {

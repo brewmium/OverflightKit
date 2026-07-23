@@ -12,6 +12,18 @@ struct MapPane: NSViewRepresentable {
 	final class ParcelAnnotation: MKPointAnnotation {}
 	final class SiteAnnotation: MKPointAnnotation {}
 
+	final class HeadAnnotation: NSObject, MKAnnotation {
+		let coordinate: CLLocationCoordinate2D
+		let headingDeg: Double?
+		let segmentClass: SegmentClass
+
+		init(head: TrackHead) {
+			coordinate = CLLocationCoordinate2D(latitude: head.lat, longitude: head.lon)
+			headingDeg = head.headingDeg
+			segmentClass = head.cls
+		}
+	}
+
 	func makeCoordinator() -> Coordinator {
 		Coordinator()
 	}
@@ -44,20 +56,22 @@ struct MapPane: NSViewRepresentable {
 		coord.model = model
 		if coord.overlayRevision != model.mapRevision {
 			coord.overlayRevision = model.mapRevision
-			coord.rebuildTrackOverlays(map, segments: model.segmentsByClass)
+			coord.rebuildTrackOverlays(map, segments: model.segmentsByClass, heads: model.trackHeads)
 		}
 		coord.syncParcel(map, lat: model.parcelLat, lon: model.parcelLon, radiusM: model.parcelRadiusM)
 	}
 
 	@MainActor
-	final class Coordinator: NSObject, @preconcurrency MKMapViewDelegate {
+	final class Coordinator: NSObject, MKMapViewDelegate {
 		var model: ViewerModel?
 		var overlayRevision = -1
 		private var parcelAnnotation: ParcelAnnotation?
 		private var parcelCircle: MKCircle?
 		private var lastParcel: (lat: Double, lon: Double, radiusM: Double) = (.nan, .nan, .nan)
 
-		func rebuildTrackOverlays(_ map: MKMapView, segments: [SegmentClass: [[CLLocationCoordinate2D]]]) {
+		func rebuildTrackOverlays(_ map: MKMapView, segments: [SegmentClass: [[CLLocationCoordinate2D]]], heads: [TrackHead]) {
+			map.removeAnnotations(map.annotations.filter { $0 is HeadAnnotation })
+			map.addAnnotations(heads.map(HeadAnnotation.init))
 			map.removeOverlays(map.overlays.filter { $0 is BandMultiPolyline })
 			// Draw order: ground first, then high bands down to low, so the
 			// low-altitude traffic — the interesting signal — sits on top.
@@ -119,7 +133,53 @@ struct MapPane: NSViewRepresentable {
 			return MKOverlayRenderer(overlay: overlay)
 		}
 
+		private var headImageCache: [SegmentClass: NSImage] = [:]
+
+		private func headColor(_ cls: SegmentClass) -> NSColor {
+			switch cls {
+			case .band(let i): return Viz.mapBand[min(max(i, 0), Viz.mapBand.count - 1)]
+			case .ground: return Viz.mapGround
+			case .unknownAlt: return Viz.mapGround
+			}
+		}
+
+		/// A small nose-up arrowhead in the band color; the annotation view is
+		/// rotated to the aircraft's course.
+		private func headImage(for cls: SegmentClass) -> NSImage {
+			if let cached = headImageCache[cls] { return cached }
+			let color = headColor(cls)
+			let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+				let path = NSBezierPath()
+				path.move(to: NSPoint(x: rect.midX, y: rect.maxY - 1))
+				path.line(to: NSPoint(x: rect.maxX - 2, y: rect.minY + 1.5))
+				path.line(to: NSPoint(x: rect.midX, y: rect.minY + 4.5))
+				path.line(to: NSPoint(x: rect.minX + 2, y: rect.minY + 1.5))
+				path.close()
+				color.setFill()
+				path.fill()
+				NSColor.white.withAlphaComponent(0.9).setStroke()
+				path.lineWidth = 1
+				path.stroke()
+				return true
+			}
+			headImageCache[cls] = image
+			return image
+		}
+
 		func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+			if let head = annotation as? HeadAnnotation {
+				let id = "head"
+				let view = mapView.dequeueReusableAnnotationView(withIdentifier: id)
+					?? MKAnnotationView(annotation: annotation, reuseIdentifier: id)
+				view.annotation = annotation
+				view.canShowCallout = false
+				view.displayPriority = .required
+				view.image = headImage(for: head.segmentClass)
+				// Compass heading is clockwise from north; AppKit rotation is
+				// counterclockwise, so negate.
+				view.frameCenterRotation = -(head.headingDeg ?? 0)
+				return view
+			}
 			if annotation is ParcelAnnotation {
 				let id = "parcel"
 				let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKMarkerAnnotationView)
