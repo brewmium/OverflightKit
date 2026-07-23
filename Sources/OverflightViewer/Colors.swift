@@ -50,6 +50,21 @@ enum Viz {
 		return Color(nsColor: .dynamic(light: hx.light, dark: hx.dark))
 	}
 
+	/// Categorical identity palette (dark-surface steps, fixed order) — one hue
+	/// per active aircraft, shared between its map arrow and its Active-now
+	/// swatch. Identity follows the aircraft, never its list position.
+	static let identityNS: [NSColor] = [
+		0x3987e5, 0xd95926, 0x199e70, 0xc98500, 0xd55181, 0x008300, 0x9085e9, 0xe66767,
+	].map { NSColor(hex: $0) }
+
+	static func identityColor(_ index: Int) -> NSColor {
+		identityNS[((index % identityNS.count) + identityNS.count) % identityNS.count]
+	}
+
+	static func identity(_ index: Int) -> Color {
+		Color(nsColor: identityColor(index))
+	}
+
 	static let seriesBlue = Color(nsColor: .dynamic(light: 0x2a78d6, dark: 0x3987e5))
 	static let ground = Color(nsColor: NSColor(hex: 0x898781))
 	static let mutedInk = Color(nsColor: NSColor(hex: 0x898781))

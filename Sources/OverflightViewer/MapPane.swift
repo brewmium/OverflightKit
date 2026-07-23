@@ -15,12 +15,12 @@ struct MapPane: NSViewRepresentable {
 	final class HeadAnnotation: NSObject, MKAnnotation {
 		let coordinate: CLLocationCoordinate2D
 		let headingDeg: Double?
-		let segmentClass: SegmentClass
+		let colorIndex: Int
 
 		init(head: TrackHead) {
 			coordinate = CLLocationCoordinate2D(latitude: head.lat, longitude: head.lon)
 			headingDeg = head.headingDeg
-			segmentClass = head.cls
+			colorIndex = head.colorIndex
 		}
 	}
 
@@ -133,27 +133,38 @@ struct MapPane: NSViewRepresentable {
 			return MKOverlayRenderer(overlay: overlay)
 		}
 
-		private var headImageCache: [SegmentClass: NSImage] = [:]
-
-		private func headColor(_ cls: SegmentClass) -> NSColor {
-			switch cls {
-			case .band(let i): return Viz.mapBand[min(max(i, 0), Viz.mapBand.count - 1)]
-			case .ground: return Viz.mapGround
-			case .unknownAlt: return Viz.mapGround
-			}
+		private struct HeadImageKey: Hashable {
+			let colorIndex: Int
+			let headingBucket: Int
 		}
 
-		/// A small nose-up arrowhead in the band color; the annotation view is
-		/// rotated to the aircraft's course.
-		private func headImage(for cls: SegmentClass) -> NSImage {
-			if let cached = headImageCache[cls] { return cached }
-			let color = headColor(cls)
-			let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+		private var headImageCache: [HeadImageKey: NSImage] = [:]
+
+		/// An arrowhead in the aircraft's identity color, rotated to its course.
+		/// The rotation is baked into the drawn path in screen coordinates
+		/// (flipped context: y down, north = up, compass heading clockwise), so
+		/// it cannot be mirrored by view-hierarchy flipping the way
+		/// frameCenterRotation was. Headings are bucketed to 10 degrees for the
+		/// cache.
+		private func headImage(colorIndex: Int, headingDeg: Double) -> NSImage {
+			let bucket = ((Int((headingDeg / 10).rounded()) % 36) + 36) % 36
+			let key = HeadImageKey(colorIndex: colorIndex, headingBucket: bucket)
+			if let cached = headImageCache[key] { return cached }
+			let color = Viz.identityColor(colorIndex)
+			let h = Double(bucket) * 10 * .pi / 180
+			// Screen-space unit vectors: d = direction of travel, r = right of travel.
+			let d = (x: sin(h), y: -cos(h))
+			let r = (x: cos(h), y: sin(h))
+			let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
+				let c = (x: rect.midX, y: rect.midY)
+				func pt(_ alongD: Double, _ alongR: Double) -> NSPoint {
+					NSPoint(x: c.x + alongD * d.x + alongR * r.x, y: c.y + alongD * d.y + alongR * r.y)
+				}
 				let path = NSBezierPath()
-				path.move(to: NSPoint(x: rect.midX, y: rect.maxY - 1))
-				path.line(to: NSPoint(x: rect.maxX - 2, y: rect.minY + 1.5))
-				path.line(to: NSPoint(x: rect.midX, y: rect.minY + 4.5))
-				path.line(to: NSPoint(x: rect.minX + 2, y: rect.minY + 1.5))
+				path.move(to: pt(7, 0))       // nose
+				path.line(to: pt(-5, 4.5))    // right tail corner
+				path.line(to: pt(-2.5, 0))    // tail notch
+				path.line(to: pt(-5, -4.5))   // left tail corner
 				path.close()
 				color.setFill()
 				path.fill()
@@ -162,7 +173,7 @@ struct MapPane: NSViewRepresentable {
 				path.stroke()
 				return true
 			}
-			headImageCache[cls] = image
+			headImageCache[key] = image
 			return image
 		}
 
@@ -174,10 +185,9 @@ struct MapPane: NSViewRepresentable {
 				view.annotation = annotation
 				view.canShowCallout = false
 				view.displayPriority = .required
-				view.image = headImage(for: head.segmentClass)
-				// Compass heading is clockwise from north; AppKit rotation is
-				// counterclockwise, so negate.
-				view.frameCenterRotation = -(head.headingDeg ?? 0)
+				// Reused views may carry rotation from the old implementation.
+				view.frameCenterRotation = 0
+				view.image = headImage(colorIndex: head.colorIndex, headingDeg: head.headingDeg ?? 0)
 				return view
 			}
 			if annotation is ParcelAnnotation {

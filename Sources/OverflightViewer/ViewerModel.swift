@@ -21,6 +21,7 @@ struct TrackHead: Identifiable, Sendable {
 	let lon: Double
 	let headingDeg: Double?
 	let cls: SegmentClass
+	let colorIndex: Int
 }
 
 /// One currently-active aircraft (heard within the last two minutes),
@@ -34,6 +35,7 @@ struct ActiveFlight: Identifiable, Sendable {
 	let onGround: Bool
 	let gsKt: Double?
 	let lastTs: Int64
+	let colorIndex: Int
 }
 
 @MainActor
@@ -72,6 +74,8 @@ final class ViewerModel {
 	var autoRefresh = true
 	private var refreshTask: Task<Void, Never>?
 	private var altimeters: AltimeterHistory?
+	/// Sticky identity-color slot per aircraft hex, held while it stays active.
+	private var identitySlots: [String: Int] = [:]
 
 	init() {
 		let cfg = (try? Config.load()) ?? .kgmjDefault
@@ -218,14 +222,27 @@ final class ViewerModel {
 			return
 		}
 		let cutoff = nowTs - 120
+		let activeTracks = tracks.filter { ($0.points.last?.ts ?? 0) >= cutoff }
+
+		// Color slots follow the aircraft (hex), not its list position: keep
+		// existing assignments, release ones that went quiet, give newcomers
+		// the lowest free slot. Past 8 live aircraft, hues repeat.
+		let activeHexes = Set(activeTracks.map(\.hex))
+		identitySlots = identitySlots.filter { activeHexes.contains($0.key) }
+		for t in activeTracks where identitySlots[t.hex] == nil {
+			let used = Set(identitySlots.values)
+			identitySlots[t.hex] = (0..<8).first { !used.contains($0) } ?? identitySlots.count % 8
+		}
+
 		var heads: [TrackHead] = []
 		var active: [ActiveFlight] = []
-		for t in tracks {
-			guard let last = t.points.last, last.ts >= cutoff else { continue }
+		for t in activeTracks {
+			guard let last = t.points.last else { continue }
+			let colorIndex = identitySlots[t.hex] ?? 0
 			active.append(ActiveFlight(
 				id: t.id, name: t.displayName, typeCode: t.typeCode,
 				aglFt: last.aglFt, altSource: last.altSource, onGround: last.onGround,
-				gsKt: last.gsKt, lastTs: last.ts
+				gsKt: last.gsKt, lastTs: last.ts, colorIndex: colorIndex
 			))
 			let cls: SegmentClass
 			if last.onGround {
@@ -241,7 +258,10 @@ final class ViewerModel {
 				let prev = t.points[t.points.count - 2]
 				heading = Geo.bearingDeg(lat1: prev.lat, lon1: prev.lon, lat2: last.lat, lon2: last.lon)
 			}
-			heads.append(TrackHead(id: t.id, lat: last.lat, lon: last.lon, headingDeg: heading, cls: cls))
+			heads.append(TrackHead(
+				id: t.id, lat: last.lat, lon: last.lon, headingDeg: heading,
+				cls: cls, colorIndex: colorIndex
+			))
 		}
 		trackHeads = heads
 		// Lowest traffic first — that's the interesting end; ground and

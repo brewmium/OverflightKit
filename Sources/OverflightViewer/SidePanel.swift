@@ -209,16 +209,13 @@ struct SidePanel: View {
 	}
 
 	private func activeRow(_ flight: ActiveFlight) -> some View {
-		let swatch: Color
+		let swatch = Viz.identity(flight.colorIndex)
 		let alt: String
 		if flight.onGround {
-			swatch = Viz.ground
 			alt = "on ground"
 		} else if let agl = flight.aglFt {
-			swatch = Viz.chartBand(AltitudeBand.classify(aglFt: agl))
 			alt = "\(Int(agl.rounded())) ft AGL (\(flight.altSource.label))"
 		} else {
-			swatch = Viz.ground
 			alt = "altitude unknown"
 		}
 		let age = max(0, Int64(Date().timeIntervalSince1970) - flight.lastTs)
