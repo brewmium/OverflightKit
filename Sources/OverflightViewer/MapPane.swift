@@ -16,11 +16,13 @@ struct MapPane: NSViewRepresentable {
 		let coordinate: CLLocationCoordinate2D
 		let headingDeg: Double?
 		let colorIndex: Int
+		let trackId: String
 
 		init(head: TrackHead) {
 			coordinate = CLLocationCoordinate2D(latitude: head.lat, longitude: head.lon)
 			headingDeg = head.headingDeg
 			colorIndex = head.colorIndex
+			trackId = head.id
 		}
 	}
 
@@ -36,8 +38,8 @@ struct MapPane: NSViewRepresentable {
 		map.showsZoomControls = true
 		context.coordinator.model = model
 
-		let center = CLLocationCoordinate2D(latitude: model.config.site.lat, longitude: model.config.site.lon)
-		let spanM = model.config.radiusNm * Geo.metersPerNm * 2.2
+		let center = CLLocationCoordinate2D(latitude: model.site.lat, longitude: model.site.lon)
+		let spanM = model.site.radiusNm * Geo.metersPerNm * 2.2
 		map.setRegion(
 			MKCoordinateRegion(center: center, latitudinalMeters: spanM, longitudinalMeters: spanM),
 			animated: false
@@ -59,15 +61,58 @@ struct MapPane: NSViewRepresentable {
 			coord.rebuildTrackOverlays(map, segments: model.segmentsByClass, heads: model.trackHeads)
 		}
 		coord.syncParcel(map, lat: model.parcelLat, lon: model.parcelLon, radiusM: model.parcelRadiusM)
+		if let focus = model.focusRequest, focus.seq != coord.handledFocusSeq {
+			coord.handledFocusSeq = focus.seq
+			coord.focus(map, trackId: focus.trackId)
+		}
 	}
 
 	@MainActor
 	final class Coordinator: NSObject, MKMapViewDelegate {
 		var model: ViewerModel?
 		var overlayRevision = -1
+		var handledFocusSeq = 0
 		private var parcelAnnotation: ParcelAnnotation?
 		private var parcelCircle: MKCircle?
 		private var lastParcel: (lat: Double, lon: Double, radiusM: Double) = (.nan, .nan, .nan)
+
+		/// Clicking an Active-now row: recenter (same zoom) if the arrow is
+		/// offscreen, then pulse it — 1s growing to 4x, 1s back.
+		func focus(_ map: MKMapView, trackId: String) {
+			guard let ann = map.annotations.compactMap({ $0 as? HeadAnnotation }).first(where: { $0.trackId == trackId }) else {
+				return
+			}
+			let visible = map.visibleMapRect.contains(MKMapPoint(ann.coordinate))
+			if !visible {
+				map.setCenter(ann.coordinate, animated: true)
+			}
+			// After a recenter, the annotation view may not exist until the
+			// pan settles; delay the pulse to land on the visible view.
+			let delay: TimeInterval = visible ? 0 : 0.45
+			DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak map] in
+				guard let map, let view = map.view(for: ann) else { return }
+				Self.pulse(view)
+			}
+		}
+
+		private static func pulse(_ view: MKAnnotationView) {
+			view.wantsLayer = true
+			guard let layer = view.layer else { return }
+			// Scale around the view's center: the default macOS anchor point is
+			// the origin, so recenter it while keeping the frame put.
+			let frame = layer.frame
+			layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+			layer.frame = frame
+			let anim = CAKeyframeAnimation(keyPath: "transform.scale")
+			anim.values = [1, 4, 1]
+			anim.keyTimes = [0, 0.5, 1]
+			anim.timingFunctions = [
+				CAMediaTimingFunction(name: .easeOut),
+				CAMediaTimingFunction(name: .easeIn),
+			]
+			anim.duration = 2
+			layer.add(anim, forKey: "pulse")
+		}
 
 		func rebuildTrackOverlays(_ map: MKMapView, segments: [SegmentClass: [[CLLocationCoordinate2D]]], heads: [TrackHead]) {
 			map.removeAnnotations(map.annotations.filter { $0 is HeadAnnotation })

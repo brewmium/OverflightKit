@@ -3,12 +3,12 @@ import Foundation
 /// Renders the `--report` text output: poll health, coverage diagnostic,
 /// and the two overflight histograms.
 public enum Report {
-	public static func generate(store: Store, config: Config, sinceDays: Int? = nil) async throws -> String {
+	public static func generate(store: Store, config: Config, site: SiteConfig, sinceDays: Int? = nil) async throws -> String {
 		let stats = try await store.pollStats(gapThresholdS: 300, expectedIntervalS: config.pollIntervalS)
 		let bounds = try await store.observationTimeBounds()
 
 		var lines: [String] = []
-		lines.append("OverflightKit report")
+		lines.append("OverflightKit report — \(site.title)")
 		lines.append("database: \(store.path)")
 
 		guard let stats else {
@@ -25,7 +25,7 @@ public enum Report {
 			from = bounds?.first ?? stats.firstTs
 		}
 
-		let tz = config.timeZone
+		let tz = site.timeZone
 		let fmt = DateFormatter()
 		fmt.dateFormat = "yyyy-MM-dd HH:mm zzz"
 		fmt.timeZone = tz
@@ -48,8 +48,8 @@ public enum Report {
 
 		let cov = Analysis.coverage(
 			observations: observations,
-			siteLat: config.site.lat, siteLon: config.site.lon,
-			fieldElevationFt: config.site.fieldElevationFt, altimeters: altimeters
+			siteLat: site.lat, siteLon: site.lon,
+			fieldElevationFt: site.fieldElevationFt, altimeters: altimeters
 		)
 
 		lines.append("Coverage diagnostic")
@@ -82,20 +82,20 @@ public enum Report {
 		lines.append("")
 
 		let tracks = Analysis.tracks(
-			from: observations, fieldElevationFt: config.site.fieldElevationFt, altimeters: altimeters
+			from: observations, fieldElevationFt: site.fieldElevationFt, altimeters: altimeters
 		)
 		let overflights = Analysis.overflights(
-			tracks: tracks, parcelLat: config.parcel.lat, parcelLon: config.parcel.lon,
-			radiusM: config.parcel.radiusM
+			tracks: tracks, parcelLat: site.parcel.lat, parcelLon: site.parcel.lon,
+			radiusM: site.parcel.radiusM
 		)
 
-		lines.append("Overflights  (parcel \(coord(config.parcel.lat)),\(coord(config.parcel.lon))  radius \(Int(config.parcel.radiusM)) m)")
+		lines.append("Overflights  (parcel \(coord(site.parcel.lat)),\(coord(site.parcel.lon))  radius \(Int(site.parcel.radiusM)) m)")
 		lines.append("  tracks through cylinder: \(num(overflights.count))")
 		lines.append("")
 
 		let hours = Analysis.hourHistogram(overflights, timeZone: tz)
 		let hourMax = hours.max() ?? 0
-		lines.append("  By hour of day (\(config.timezone))")
+		lines.append("  By hour of day (\(site.timezone))")
 		for (h, n) in hours.enumerated() {
 			lines.append("  \(String(format: "%02d", h)) |\(bar(n, max: hourMax)) \(n > 0 ? String(n) : "")")
 		}

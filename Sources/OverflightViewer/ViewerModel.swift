@@ -38,10 +38,18 @@ struct ActiveFlight: Identifiable, Sendable {
 	let colorIndex: Int
 }
 
+/// A one-shot "find this aircraft on the map" request from the Active-now
+/// list; the sequence number distinguishes repeat clicks on the same row.
+struct FocusRequest: Equatable {
+	let trackId: String
+	let seq: Int
+}
+
 @MainActor
 @Observable
 final class ViewerModel {
-	var config: Config
+	let site: SiteConfig
+	private(set) var config: Config
 	private(set) var store: Store?
 	private(set) var loadError: String?
 	private(set) var loading = false
@@ -53,7 +61,7 @@ final class ViewerModel {
 	var enabledBands: Set<AltitudeBand> = Set(AltitudeBand.allCases)
 	var showGround = false
 
-	// Parcel
+	// Parcel (persisted back to the site's config entry automatically)
 	var parcelLat: Double
 	var parcelLon: Double
 	var parcelRadiusM: Double
@@ -70,19 +78,31 @@ final class ViewerModel {
 	private(set) var activeFlights: [ActiveFlight] = []
 	private(set) var mapRevision = 0
 	private(set) var lastLoaded: Date?
+	private(set) var focusRequest: FocusRequest?
 
 	var autoRefresh = true
 	private var refreshTask: Task<Void, Never>?
 	private var altimeters: AltimeterHistory?
 	/// Sticky identity-color slot per aircraft hex, held while it stays active.
 	private var identitySlots: [String: Int] = [:]
+	private var focusSeq = 0
 
-	init() {
-		let cfg = (try? Config.load()) ?? .kgmjDefault
-		config = cfg
-		parcelLat = cfg.parcel.lat
-		parcelLon = cfg.parcel.lon
-		parcelRadiusM = cfg.parcel.radiusM
+	// Incremental refresh state. Rows older than `settledTs` are final in the
+	// buffer; the tail (rows newer than that) is re-fetched every cycle because
+	// a poll's rows commit a moment after its timestamp.
+	private var settledObservations: [AircraftObservation] = []
+	private var tailObservations: [AircraftObservation] = []
+	private var settledTs: Int64 = 0
+	private static let settleMarginS: Int64 = 20
+
+	var windowTitle: String { site.title }
+
+	init(site: SiteConfig, config: Config) {
+		self.site = site
+		self.config = config
+		parcelLat = site.parcel.lat
+		parcelLon = site.parcel.lon
+		parcelRadiusM = site.parcel.radiusM
 		let now = Date()
 		rangeEnd = now
 		rangeStart = now.addingTimeInterval(-7 * 86_400)
@@ -91,25 +111,28 @@ final class ViewerModel {
 	func start() {
 		guard refreshTask == nil else { return }
 		refreshTask = Task { [weak self] in
+			var first = true
 			while !Task.isCancelled {
 				guard let self else { return }
-				if self.autoRefresh || self.lastLoaded == nil {
+				if first {
+					first = false
 					await self.reload()
+				} else if self.autoRefresh {
+					await self.refreshTick()
 				}
-				try? await Task.sleep(for: .seconds(30))
+				try? await Task.sleep(for: .seconds(10))
 			}
 		}
 	}
 
+	/// Full reload: used at start and whenever the window itself changes
+	/// (preset, custom dates). Auto-refresh uses the incremental path.
 	func reload() async {
 		guard !loading else { return }
 		loading = true
 		defer { loading = false }
 		do {
-			if store == nil {
-				store = try Store(path: config.expandedDbPath, readOnly: true)
-			}
-			guard let store else { return }
+			let store = try openStoreIfNeeded()
 
 			if rangePreset != .custom {
 				rangeEnd = Date()
@@ -128,25 +151,11 @@ final class ViewerModel {
 			let from = Int64(rangeStart.timeIntervalSince1970)
 			let to = Int64(rangeEnd.timeIntervalSince1970)
 			let obs = try await store.observations(from: from, to: to)
-			let metars = try await store.metarSamples(from: from - 10_800, to: to + 10_800)
-			pollStats = try await store.pollStats(gapThresholdS: 300, expectedIntervalS: config.pollIntervalS)
+			settledTs = to - Self.settleMarginS
+			settledObservations = obs.filter { $0.ts <= settledTs }
+			tailObservations = obs.filter { $0.ts > settledTs }
 
-			let cfg = config
-			let alts = AltimeterHistory(samples: metars)
-			altimeters = alts
-			let built = await Task.detached {
-				let t = Analysis.tracks(from: obs, fieldElevationFt: cfg.site.fieldElevationFt, altimeters: alts)
-				let c = Analysis.coverage(
-					observations: obs, siteLat: cfg.site.lat, siteLon: cfg.site.lon,
-					fieldElevationFt: cfg.site.fieldElevationFt, altimeters: alts
-				)
-				return (t, c)
-			}.value
-
-			tracks = built.0
-			coverage = built.1
-			recomputeStats()
-			rebuildSegments()
+			try await finishRebuild(store: store, from: from, to: to)
 			loadError = nil
 			lastLoaded = Date()
 		} catch {
@@ -155,13 +164,88 @@ final class ViewerModel {
 		}
 	}
 
+	/// Incremental refresh: slide the window forward and fetch only rows newer
+	/// than the settled boundary, so a 10s cadence stays cheap over a
+	/// weeks-deep database.
+	private func refreshTick() async {
+		guard !loading else { return }
+		guard rangePreset != .custom else {
+			// Fixed historical window: only the status strip needs refreshing.
+			if let store {
+				pollStats = try? await store.pollStats(gapThresholdS: 300, expectedIntervalS: config.pollIntervalS)
+				rebuildTrackHeads()
+			}
+			return
+		}
+		loading = true
+		defer { loading = false }
+		do {
+			let store = try openStoreIfNeeded()
+			rangeEnd = Date()
+			switch rangePreset {
+			case .day: rangeStart = rangeEnd.addingTimeInterval(-86_400)
+			case .week: rangeStart = rangeEnd.addingTimeInterval(-7 * 86_400)
+			case .month: rangeStart = rangeEnd.addingTimeInterval(-30 * 86_400)
+			case .all, .custom: break
+			}
+			let from = Int64(rangeStart.timeIntervalSince1970)
+			let to = Int64(rangeEnd.timeIntervalSince1970)
+
+			let fresh = try await store.observations(from: settledTs + 1, to: to)
+			let newSettled = to - Self.settleMarginS
+			settledObservations.append(contentsOf: fresh.filter { $0.ts <= newSettled })
+			tailObservations = fresh.filter { $0.ts > newSettled }
+			settledTs = newSettled
+			if let firstKept = settledObservations.first, firstKept.ts < from {
+				settledObservations.removeAll { $0.ts < from }
+			}
+
+			try await finishRebuild(store: store, from: from, to: to)
+			loadError = nil
+			lastLoaded = Date()
+		} catch {
+			loadError = "\(error)"
+			store = nil
+		}
+	}
+
+	private func openStoreIfNeeded() throws -> Store {
+		if let store { return store }
+		let s = try Store(path: site.expandedDbPath, readOnly: true)
+		store = s
+		return s
+	}
+
+	private func finishRebuild(store: Store, from: Int64, to: Int64) async throws {
+		let metars = try await store.metarSamples(from: from - 10_800, to: to + 10_800)
+		pollStats = try await store.pollStats(gapThresholdS: 300, expectedIntervalS: config.pollIntervalS)
+
+		let siteCfg = site
+		let alts = AltimeterHistory(samples: metars)
+		altimeters = alts
+		let obs = settledObservations + tailObservations
+		let built = await Task.detached {
+			let t = Analysis.tracks(from: obs, fieldElevationFt: siteCfg.fieldElevationFt, altimeters: alts)
+			let c = Analysis.coverage(
+				observations: obs, siteLat: siteCfg.lat, siteLon: siteCfg.lon,
+				fieldElevationFt: siteCfg.fieldElevationFt, altimeters: alts
+			)
+			return (t, c)
+		}.value
+
+		tracks = built.0
+		coverage = built.1
+		recomputeStats()
+		rebuildSegments()
+	}
+
 	/// Overflights + histograms. Cheap enough to run on every parcel move.
 	func recomputeStats() {
 		let ofs = Analysis.overflights(
 			tracks: tracks, parcelLat: parcelLat, parcelLon: parcelLon, radiusM: parcelRadiusM
 		)
 		overflights = ofs
-		hourHist = Analysis.hourHistogram(ofs, timeZone: config.timeZone)
+		hourHist = Analysis.hourHistogram(ofs, timeZone: site.timeZone)
 		bandHist = Analysis.bandHistogram(ofs)
 	}
 
@@ -297,26 +381,49 @@ final class ViewerModel {
 		rebuildSegments()
 	}
 
+	func requestFocus(trackId: String) {
+		focusSeq += 1
+		focusRequest = FocusRequest(trackId: trackId, seq: focusSeq)
+	}
+
+	// MARK: - Parcel (auto-saved)
+
 	func parcelMoved(lat: Double, lon: Double) {
 		parcelLat = lat
 		parcelLon = lon
 		recomputeStats()
+		persistParcel()
 	}
 
-	func resetParcelToSite() {
-		parcelLat = config.site.lat
-		parcelLon = config.site.lon
+	func parcelRadiusChanged() {
 		recomputeStats()
+		persistParcel()
 	}
 
-	func saveParcelToConfig() {
-		config.parcel = Config.Parcel(lat: parcelLat, lon: parcelLon, radiusM: parcelRadiusM)
+	func resetParcelToDefaults() {
+		parcelLat = site.lat
+		parcelLon = site.lon
+		parcelRadiusM = 400
+		recomputeStats()
+		persistParcel()
+	}
+
+	/// Read-modify-write against the on-disk config so edits from other
+	/// windows (other sites) aren't clobbered.
+	private func persistParcel() {
 		do {
-			try config.save()
+			var disk = try Config.load()
+			guard var target = disk.site(slug: site.slug) else { return }
+			target.parcel = SiteConfig.Parcel(lat: parcelLat, lon: parcelLon, radiusM: parcelRadiusM)
+			disk.upsert(site: target)
+			try disk.save()
+			config = disk
 		} catch {
 			loadError = "saving config: \(error)"
 		}
 	}
+
+	// MARK: - Date range
 
 	func setPreset(_ p: RangePreset) {
 		rangePreset = p

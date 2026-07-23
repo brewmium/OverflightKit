@@ -23,11 +23,13 @@ struct PollOutcome: Sendable {
 
 struct CollectorLoop: Sendable {
 	let config: Config
+	let site: SiteConfig
 	let store: Store
 	let session: URLSession
 
-	init(config: Config, store: Store) {
+	init(config: Config, site: SiteConfig, store: Store) {
 		self.config = config
+		self.site = site
 		self.store = store
 		let sc = URLSessionConfiguration.ephemeral
 		sc.timeoutIntervalForRequest = 8
@@ -44,7 +46,7 @@ struct CollectorLoop: Sendable {
 			)
 		}
 		guard let base = Config.baseURL(forSource: name),
-			let url = URL(string: "\(base)/v2/point/\(config.site.lat)/\(config.site.lon)/\(Int(config.radiusNm.rounded()))")
+			let url = URL(string: "\(base)/v2/point/\(site.lat)/\(site.lon)/\(Int(site.radiusNm.rounded()))")
 		else {
 			return failed(nil, "unknown source '\(name)'", nil)
 		}
@@ -99,7 +101,7 @@ struct CollectorLoop: Sendable {
 		var okSinceLastSummary = 0
 		var acSinceLastSummary = 0
 		var lastMetarAttempt: Int64 = 0
-		if let ts = try? await store.latestMetarTs(station: config.metarStation) {
+		if let ts = try? await store.latestMetarTs(station: site.metarStation) {
 			lastMetarAttempt = ts
 		}
 
@@ -154,10 +156,10 @@ struct CollectorLoop: Sendable {
 			let now = Int64(Date().timeIntervalSince1970)
 			if now - lastMetarAttempt >= 3600 {
 				do {
-					let (sample, raw) = try await MetarClient.fetchLatest(station: config.metarStation, session: session)
-					try await store.record(metarTs: sample.ts, station: config.metarStation, altimHpa: sample.altimHpa, raw: raw)
+					let (sample, raw) = try await MetarClient.fetchLatest(station: site.metarStation, session: session)
+					try await store.record(metarTs: sample.ts, station: site.metarStation, altimHpa: sample.altimHpa, raw: raw)
 					lastMetarAttempt = now
-					log("metar \(config.metarStation): altim \(sample.altimHpa) hPa")
+					log("metar \(site.metarStation): altim \(sample.altimHpa) hPa")
 				} catch {
 					// Retry in 5 minutes rather than a full hour.
 					lastMetarAttempt = now - 3600 + 300
@@ -194,12 +196,14 @@ struct OverflightCollectorMain {
 		OverflightCollector — ADS-B overflight sampler
 
 		usage:
-		  OverflightCollector [--config PATH]            run the collector loop
-		  OverflightCollector --once [--config PATH]     single poll, print aircraft, exit
-		  OverflightCollector --report [--days N] [--config PATH]
-		                                                 print histograms + coverage diagnostic
+		  OverflightCollector [--site SLUG] [--config PATH]   run the collector loop
+		  OverflightCollector --once [--site SLUG]            single poll, print aircraft, exit
+		  OverflightCollector --report [--days N] [--site SLUG]
+		                                                      print histograms + coverage diagnostic
+		  OverflightCollector --list-sites                    print configured sites
 
-		config defaults to \(Config.defaultPath) and is created with KGMJ defaults if missing.
+		--site defaults to the first configured site; config defaults to
+		\(Config.defaultPath) and is created with KGMJ defaults if missing.
 		"""
 	}
 
@@ -207,7 +211,9 @@ struct OverflightCollectorMain {
 		var configPath: String?
 		var report = false
 		var once = false
+		var listSites = false
 		var days: Int?
+		var siteSlug: String?
 
 		var args = ArraySlice(CommandLine.arguments.dropFirst())
 		while let arg = args.popFirst() {
@@ -215,10 +221,15 @@ struct OverflightCollectorMain {
 			case "--config":
 				guard let v = args.popFirst() else { throw OverflightError.usage("--config requires a path") }
 				configPath = v
+			case "--site":
+				guard let v = args.popFirst() else { throw OverflightError.usage("--site requires a slug") }
+				siteSlug = v
 			case "--report":
 				report = true
 			case "--once":
 				once = true
+			case "--list-sites":
+				listSites = true
 			case "--days":
 				guard let v = args.popFirst(), let n = Int(v), n > 0 else {
 					throw OverflightError.usage("--days requires a positive integer")
@@ -234,16 +245,28 @@ struct OverflightCollectorMain {
 
 		let config = try Config.loadOrCreate(path: configPath)
 
+		if listSites {
+			for s in config.sites {
+				print("\(s.slug)\t\(s.title)\t\(s.expandedDbPath)")
+			}
+			return
+		}
+
+		guard let site = config.site(slug: siteSlug) else {
+			let known = config.sites.map(\.slug).joined(separator: ", ")
+			throw OverflightError.usage("unknown site '\(siteSlug ?? "")' — configured: \(known)")
+		}
+
 		if report {
-			let store = try Store(path: config.expandedDbPath, readOnly: true)
-			let text = try await Report.generate(store: store, config: config, sinceDays: days)
+			let store = try Store(path: site.expandedDbPath, readOnly: true)
+			let text = try await Report.generate(store: store, config: config, site: site, sinceDays: days)
 			await store.close()
 			print(text)
 			return
 		}
 
-		let store = try Store(path: config.expandedDbPath, readOnly: false)
-		let loop = CollectorLoop(config: config, store: store)
+		let store = try Store(path: site.expandedDbPath, readOnly: false)
+		let loop = CollectorLoop(config: config, site: site, store: store)
 
 		if once {
 			try await loop.pollOnce()
@@ -251,7 +274,7 @@ struct OverflightCollectorMain {
 			return
 		}
 
-		log("collector starting: \(config.site.lat),\(config.site.lon) r=\(Int(config.radiusNm))nm every \(Int(config.pollIntervalS))s -> \(config.expandedDbPath)")
+		log("collector starting [\(site.slug)]: \(site.lat),\(site.lon) r=\(Int(site.radiusNm))nm every \(Int(config.pollIntervalS))s -> \(site.expandedDbPath)")
 		let task = Task { await loop.run() }
 		let sigint = makeSignalSource(SIGINT, cancelling: task)
 		let sigterm = makeSignalSource(SIGTERM, cancelling: task)

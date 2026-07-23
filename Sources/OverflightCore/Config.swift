@@ -1,24 +1,22 @@
 import Foundation
 
-/// Collector + viewer configuration, loaded from ~/.overflight/config.json.
-/// Every field has a KGMJ default so a partial file (or none) still works.
-public struct Config: Codable, Sendable, Equatable {
-	public struct Site: Codable, Sendable, Equatable {
-		public var lat: Double
-		public var lon: Double
-		public var fieldElevationFt: Double
+/// One monitored location: query center, parcel, its own database.
+/// The slug keys everything — `--site` on the collector, the LaunchAgent
+/// label suffix, the default database filename.
+public struct SiteConfig: Codable, Sendable, Equatable, Identifiable {
+	public var slug: String
+	public var icao: String?
+	public var displayName: String
+	public var lat: Double
+	public var lon: Double
+	public var fieldElevationFt: Double
+	public var radiusNm: Double
+	public var parcel: Parcel
+	public var dbPath: String
+	public var metarStation: String
+	public var timezone: String
 
-		enum CodingKeys: String, CodingKey {
-			case lat, lon
-			case fieldElevationFt = "field_elevation_ft"
-		}
-
-		public init(lat: Double, lon: Double, fieldElevationFt: Double) {
-			self.lat = lat
-			self.lon = lon
-			self.fieldElevationFt = fieldElevationFt
-		}
-	}
+	public var id: String { slug }
 
 	public struct Parcel: Codable, Sendable, Equatable {
 		public var lat: Double
@@ -37,69 +35,51 @@ public struct Config: Codable, Sendable, Equatable {
 		}
 	}
 
-	public var site: Site
-	public var radiusNm: Double
-	public var parcel: Parcel
-	public var pollIntervalS: Double
-	public var dbPath: String
-	public var primarySource: String
-	public var fallbackSource: String
-	public var metarStation: String
-	public var timezone: String
-
 	enum CodingKeys: String, CodingKey {
-		case site, parcel, timezone
+		case slug, icao, lat, lon, parcel, timezone
+		case displayName = "display_name"
+		case fieldElevationFt = "field_elevation_ft"
 		case radiusNm = "radius_nm"
-		case pollIntervalS = "poll_interval_s"
 		case dbPath = "db_path"
-		case primarySource = "primary_source"
-		case fallbackSource = "fallback_source"
 		case metarStation = "metar_station"
 	}
 
 	public init(
-		site: Site, radiusNm: Double, parcel: Parcel, pollIntervalS: Double,
-		dbPath: String, primarySource: String, fallbackSource: String,
-		metarStation: String, timezone: String
+		slug: String, icao: String?, displayName: String,
+		lat: Double, lon: Double, fieldElevationFt: Double,
+		radiusNm: Double = 15, parcel: Parcel? = nil,
+		dbPath: String? = nil, metarStation: String? = nil,
+		timezone: String = "America/Chicago"
 	) {
-		self.site = site
+		self.slug = slug
+		self.icao = icao
+		self.displayName = displayName
+		self.lat = lat
+		self.lon = lon
+		self.fieldElevationFt = fieldElevationFt
 		self.radiusNm = radiusNm
-		self.parcel = parcel
-		self.pollIntervalS = pollIntervalS
-		self.dbPath = dbPath
-		self.primarySource = primarySource
-		self.fallbackSource = fallbackSource
-		self.metarStation = metarStation
+		self.parcel = parcel ?? Parcel(lat: lat, lon: lon, radiusM: 400)
+		self.dbPath = dbPath ?? "~/.overflight/\(slug).db"
+		self.metarStation = metarStation ?? icao ?? ""
 		self.timezone = timezone
 	}
 
 	public init(from decoder: Decoder) throws {
-		let d = Config.kgmjDefault
 		let c = try decoder.container(keyedBy: CodingKeys.self)
-		site = try c.decodeIfPresent(Site.self, forKey: .site) ?? d.site
-		radiusNm = try c.decodeIfPresent(Double.self, forKey: .radiusNm) ?? d.radiusNm
-		parcel = try c.decodeIfPresent(Parcel.self, forKey: .parcel) ?? d.parcel
-		pollIntervalS = try c.decodeIfPresent(Double.self, forKey: .pollIntervalS) ?? d.pollIntervalS
-		dbPath = try c.decodeIfPresent(String.self, forKey: .dbPath) ?? d.dbPath
-		primarySource = try c.decodeIfPresent(String.self, forKey: .primarySource) ?? d.primarySource
-		fallbackSource = try c.decodeIfPresent(String.self, forKey: .fallbackSource) ?? d.fallbackSource
-		metarStation = try c.decodeIfPresent(String.self, forKey: .metarStation) ?? d.metarStation
-		timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? d.timezone
+		let icao = try c.decodeIfPresent(String.self, forKey: .icao)
+		let slug = try c.decodeIfPresent(String.self, forKey: .slug) ?? icao?.lowercased() ?? "site"
+		self.slug = slug
+		self.icao = icao
+		displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? icao ?? slug
+		lat = try c.decode(Double.self, forKey: .lat)
+		lon = try c.decode(Double.self, forKey: .lon)
+		fieldElevationFt = try c.decodeIfPresent(Double.self, forKey: .fieldElevationFt) ?? 0
+		radiusNm = try c.decodeIfPresent(Double.self, forKey: .radiusNm) ?? 15
+		parcel = try c.decodeIfPresent(Parcel.self, forKey: .parcel) ?? Parcel(lat: lat, lon: lon, radiusM: 400)
+		dbPath = try c.decodeIfPresent(String.self, forKey: .dbPath) ?? "~/.overflight/\(slug).db"
+		metarStation = try c.decodeIfPresent(String.self, forKey: .metarStation) ?? icao ?? ""
+		timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "America/Chicago"
 	}
-
-	public static let kgmjDefault = Config(
-		site: Site(lat: 36.6067, lon: -94.7386, fieldElevationFt: 832),
-		radiusNm: 15,
-		parcel: Parcel(lat: 36.6067, lon: -94.7386, radiusM: 400),
-		pollIntervalS: 10,
-		dbPath: "~/.overflight/overflight.db",
-		primarySource: "adsb.lol",
-		fallbackSource: "airplanes.live",
-		metarStation: "KGMJ",
-		timezone: "America/Chicago"
-	)
-
-	public static let defaultPath = "~/.overflight/config.json"
 
 	public var expandedDbPath: String {
 		(dbPath as NSString).expandingTildeInPath
@@ -107,6 +87,126 @@ public struct Config: Codable, Sendable, Equatable {
 
 	public var timeZone: TimeZone {
 		TimeZone(identifier: timezone) ?? .current
+	}
+
+	/// "KGMJ — Grove Muni, OK" (or just the display name when no ICAO).
+	public var title: String {
+		if let icao, !icao.isEmpty, icao != displayName {
+			return "\(icao) — \(displayName)"
+		}
+		return displayName
+	}
+}
+
+/// Global settings plus the site list, at ~/.overflight/config.json.
+/// A legacy single-site file (top-level `site`/`parcel`/`db_path` keys)
+/// decodes into a one-element site list, preserving its database path.
+public struct Config: Codable, Sendable, Equatable {
+	public var pollIntervalS: Double
+	public var primarySource: String
+	public var fallbackSource: String
+	public var sites: [SiteConfig]
+
+	enum CodingKeys: String, CodingKey {
+		case sites
+		case pollIntervalS = "poll_interval_s"
+		case primarySource = "primary_source"
+		case fallbackSource = "fallback_source"
+	}
+
+	private enum LegacyKeys: String, CodingKey {
+		case site, parcel, timezone
+		case radiusNm = "radius_nm"
+		case dbPath = "db_path"
+		case metarStation = "metar_station"
+	}
+
+	private struct LegacySite: Decodable {
+		let lat: Double
+		let lon: Double
+		let fieldElevationFt: Double?
+
+		enum CodingKeys: String, CodingKey {
+			case lat, lon
+			case fieldElevationFt = "field_elevation_ft"
+		}
+	}
+
+	public init(pollIntervalS: Double, primarySource: String, fallbackSource: String, sites: [SiteConfig]) {
+		self.pollIntervalS = pollIntervalS
+		self.primarySource = primarySource
+		self.fallbackSource = fallbackSource
+		self.sites = sites
+	}
+
+	public init(from decoder: Decoder) throws {
+		let d = Config.kgmjDefault
+		let c = try decoder.container(keyedBy: CodingKeys.self)
+		pollIntervalS = try c.decodeIfPresent(Double.self, forKey: .pollIntervalS) ?? d.pollIntervalS
+		primarySource = try c.decodeIfPresent(String.self, forKey: .primarySource) ?? d.primarySource
+		fallbackSource = try c.decodeIfPresent(String.self, forKey: .fallbackSource) ?? d.fallbackSource
+		if let decoded = try c.decodeIfPresent([SiteConfig].self, forKey: .sites), !decoded.isEmpty {
+			sites = decoded
+			return
+		}
+		// Legacy single-site layout.
+		let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+		guard let ls = try legacy.decodeIfPresent(LegacySite.self, forKey: .site) else {
+			sites = d.sites
+			return
+		}
+		let station = try legacy.decodeIfPresent(String.self, forKey: .metarStation) ?? "KGMJ"
+		var site = SiteConfig(
+			slug: station.lowercased(),
+			icao: station,
+			displayName: station == "KGMJ" ? "Grove Muni, OK" : station,
+			lat: ls.lat, lon: ls.lon,
+			fieldElevationFt: ls.fieldElevationFt ?? 0,
+			radiusNm: try legacy.decodeIfPresent(Double.self, forKey: .radiusNm) ?? 15,
+			metarStation: station,
+			timezone: try legacy.decodeIfPresent(String.self, forKey: .timezone) ?? "America/Chicago"
+		)
+		if let p = try legacy.decodeIfPresent(SiteConfig.Parcel.self, forKey: .parcel) {
+			site.parcel = p
+		}
+		if let path = try legacy.decodeIfPresent(String.self, forKey: .dbPath) {
+			site.dbPath = path
+		}
+		sites = [site]
+	}
+
+	public static let kgmjSite = SiteConfig(
+		slug: "kgmj",
+		icao: "KGMJ",
+		displayName: "Grove Muni, OK",
+		lat: 36.6067, lon: -94.7386,
+		fieldElevationFt: 832,
+		radiusNm: 15,
+		dbPath: "~/.overflight/overflight.db",
+		metarStation: "KGMJ",
+		timezone: "America/Chicago"
+	)
+
+	public static let kgmjDefault = Config(
+		pollIntervalS: 10,
+		primarySource: "adsb.lol",
+		fallbackSource: "airplanes.live",
+		sites: [kgmjSite]
+	)
+
+	public static let defaultPath = "~/.overflight/config.json"
+
+	public func site(slug: String?) -> SiteConfig? {
+		guard let slug else { return sites.first }
+		return sites.first { $0.slug == slug }
+	}
+
+	public mutating func upsert(site: SiteConfig) {
+		if let i = sites.firstIndex(where: { $0.slug == site.slug }) {
+			sites[i] = site
+		} else {
+			sites.append(site)
+		}
 	}
 
 	/// Known aggregator hosts. A source name that is already a URL is used as-is,

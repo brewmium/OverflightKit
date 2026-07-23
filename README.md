@@ -8,9 +8,12 @@ A macOS toolkit that answers one question about a specific parcel of land:
 A headless collector samples free ADS-B aggregator APIs around a fixed point
 every 10 seconds and appends every observation to SQLite. A SwiftUI viewer
 opens the same database read-only and shows track polylines on a satellite map,
-a draggable parcel marker with a radius ring, and hour-of-day / altitude-band
-histograms that recompute live. The default configuration targets Grove
-Regional Airport (KGMJ), Grove, Oklahoma.
+identity-colored arrows on currently-active aircraft, a draggable parcel marker
+with a radius ring, and hour-of-day / altitude-band histograms that recompute
+live. Multiple sites are supported — each gets its own collector agent and
+database, and each viewer window binds to one site (new sites autofill from an
+ICAO identifier via the station's METAR). The default configuration targets
+Grove Regional Airport (KGMJ), Grove, Oklahoma.
 
 No third-party dependencies: SQLite via the C API, URLSession, SwiftUI +
 MapKit. Swift 6, macOS 14+, strict concurrency.
@@ -20,15 +23,16 @@ MapKit. Swift 6, macOS 14+, strict concurrency.
 ```sh
 swift test                      # unit tests
 swift run OverflightCollector --once     # single poll, prints what it saw
-scripts/install-agent.sh        # build release + install LaunchAgent (headless)
-tail -f ~/.overflight/log/collector.log
+scripts/install-agent.sh        # build release + install a LaunchAgent per site
+tail -f ~/.overflight/log/kgmj.log
 
 swift run OverflightViewer      # the map + histograms viewer
 scripts/make-viewer-app.sh      # or wrap the viewer in a proper .app bundle
 
-~/.overflight/bin/OverflightCollector --report            # text report, all data
-~/.overflight/bin/OverflightCollector --report --days 7   # last week only
-scripts/uninstall-agent.sh      # stop the agent (data stays)
+~/.overflight/bin/OverflightCollector --list-sites
+~/.overflight/bin/OverflightCollector --report --site kgmj            # all data
+~/.overflight/bin/OverflightCollector --report --site kgmj --days 7   # last week
+scripts/uninstall-agent.sh      # stop all agents (data stays)
 ```
 
 The collector and viewer are independent; the database is opened in WAL mode
@@ -36,28 +40,35 @@ so both run concurrently. The viewer never writes the database.
 
 ## Configuration — `~/.overflight/config.json`
 
-Created with KGMJ defaults on first run. Every field is optional; missing keys
-fall back to the defaults shown here (see `config.example.json`):
+Created with KGMJ defaults on first run. Global keys plus a `sites` array
+(see `config.example.json`); a legacy single-site file is migrated
+automatically:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `site.lat`, `site.lon` | 36.6067, -94.7386 | Query center (KGMJ reference point) |
-| `site.field_elevation_ft` | 832 | Field elevation MSL, for AGL math |
-| `radius_nm` | 15 | Collection radius around the site |
-| `parcel.lat`, `parcel.lon` | site | Parcel of interest centroid |
-| `parcel.radius_m` | 400 | Overflight cylinder radius |
 | `poll_interval_s` | 10 | Poll cadence (±1 s jitter is added) |
-| `db_path` | `~/.overflight/overflight.db` | SQLite database location |
 | `primary_source` | `adsb.lol` | Primary aggregator |
 | `fallback_source` | `airplanes.live` | Used after 3 consecutive primary failures |
-| `metar_station` | `KGMJ` | Station for hourly altimeter-setting fetches |
-| `timezone` | `America/Chicago` | Local time for the hour-of-day histogram |
+| `sites[].slug` | — | Key for `--site`, agent label, default db filename |
+| `sites[].icao`, `display_name` | — | Title-bar identity ("KGMJ — Grove Muni, OK") |
+| `sites[].lat`, `lon` | — | Query center |
+| `sites[].field_elevation_ft` | 0 | Field elevation MSL, for AGL math |
+| `sites[].radius_nm` | 15 | Collection radius around the site |
+| `sites[].parcel` | site center, 400 m | Overflight cylinder (centroid + radius_m) |
+| `sites[].db_path` | `~/.overflight/<slug>.db` | Per-site SQLite database |
+| `sites[].metar_station` | icao | Station for hourly altimeter fetches |
+| `sites[].timezone` | `America/Chicago` | Local time for the hour histogram |
 
 Source names can also be a full base URL of any ADSBExchange-v2-compatible API
 (`https://host` serving `/v2/point/{lat}/{lon}/{radius_nm}`).
 
-The parcel can be moved by dragging the marker in the viewer; "Save to config"
-persists it.
+Each collector process serves one site (`--site <slug>`, defaulting to the
+first), and `scripts/install-agent.sh` installs one LaunchAgent per site. In
+the viewer, every window starts at a site picker — picking a site another
+window already shows gives you a clone — and "Add site" autofills coordinates,
+elevation, and name from an ICAO identifier. Parcel edits (drag, radius)
+save back to the config automatically; "Reset to defaults" restores the site
+center and a 400 m radius.
 
 ## Sampling behavior
 

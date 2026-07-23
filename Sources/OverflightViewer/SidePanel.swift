@@ -15,6 +15,9 @@ struct SidePanel: View {
 				} else {
 					ForEach(model.activeFlights) { flight in
 						activeRow(flight)
+							.contentShape(Rectangle())
+							.onTapGesture { model.requestFocus(trackId: flight.id) }
+							.help("Show this aircraft on the map")
 					}
 				}
 			}
@@ -98,13 +101,16 @@ struct SidePanel: View {
 					in: 50...3000,
 					onEditingChanged: { editing in
 						if !editing {
-							model.recomputeStats()
+							model.parcelRadiusChanged()
 						}
 					}
 				)
 				HStack {
-					Button("Reset to field") { model.resetParcelToSite() }
-					Button("Save to config") { model.saveParcelToConfig() }
+					Button("Reset to defaults") { model.resetParcelToDefaults() }
+					Spacer()
+					Text("changes save automatically")
+						.font(.caption2)
+						.foregroundStyle(.secondary)
 				}
 				.controlSize(.small)
 			}
@@ -117,7 +123,7 @@ struct SidePanel: View {
 						.font(.caption)
 						.foregroundStyle(.secondary)
 				}
-				BarChartView(title: "By hour of day (\(model.config.timezone))", data: hourData)
+				BarChartView(title: "By hour of day (\(model.site.timezone))", data: hourData)
 				BarChartView(title: "By altitude band at closest approach (ft AGL)", data: bandData)
 				if model.bandHist.unknownCount > 0 {
 					Text("\(model.bandHist.unknownCount) overflight(s) had no usable altitude at closest approach")
@@ -248,7 +254,7 @@ struct SidePanel: View {
 	private func overflightRow(_ of: Overflight) -> some View {
 		let fmt = DateFormatter()
 		fmt.dateFormat = "MM-dd HH:mm"
-		fmt.timeZone = model.config.timeZone
+		fmt.timeZone = model.site.timeZone
 		let time = fmt.string(from: Date(timeIntervalSince1970: Double(of.closestPoint.ts)))
 		let alt: String
 		if let agl = of.closestPoint.aglFt {
