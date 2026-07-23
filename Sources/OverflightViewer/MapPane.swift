@@ -98,19 +98,29 @@ struct MapPane: NSViewRepresentable {
 		private static func pulse(_ view: MKAnnotationView) {
 			view.wantsLayer = true
 			guard let layer = view.layer else { return }
-			// Scale around the view's center: the default macOS anchor point is
-			// the origin, so recenter it while keeping the frame put.
-			let frame = layer.frame
-			layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-			layer.frame = frame
-			let anim = CAKeyframeAnimation(keyPath: "transform.scale")
-			anim.values = [1, 4, 1]
+			// Scale around the view's center without touching anchorPoint —
+			// MapKit repositions annotation views assuming the default anchor,
+			// so mutating it makes the view lurch mid-animation. Instead the
+			// centering is composed into the transform: p' = c + s(p - c).
+			let cx = layer.bounds.midX
+			let cy = layer.bounds.midY
+			func scaledAboutCenter(_ s: CGFloat) -> CATransform3D {
+				var t = CATransform3DMakeTranslation((1 - s) * cx, (1 - s) * cy, 0)
+				t = CATransform3DScale(t, s, s, 1)
+				return t
+			}
+			let anim = CAKeyframeAnimation(keyPath: "transform")
+			anim.values = [
+				NSValue(caTransform3D: CATransform3DIdentity),
+				NSValue(caTransform3D: scaledAboutCenter(4)),
+				NSValue(caTransform3D: CATransform3DIdentity),
+			]
 			anim.keyTimes = [0, 0.5, 1]
 			anim.timingFunctions = [
 				CAMediaTimingFunction(name: .easeOut),
 				CAMediaTimingFunction(name: .easeIn),
 			]
-			anim.duration = 2
+			anim.duration = 1
 			layer.add(anim, forKey: "pulse")
 		}
 
