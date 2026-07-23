@@ -12,17 +12,29 @@ struct SidePanel: View {
 					Text("Nothing in the air right now")
 						.font(.caption)
 						.foregroundStyle(.secondary)
-				} else {
+				} else if model.activeFlights.count <= 10 {
 					ForEach(model.activeFlights) { flight in
-						activeRow(flight)
-							.contentShape(Rectangle())
-							.onTapGesture { model.requestFocus(trackId: flight.id) }
-							.help("Show this aircraft on the map")
+						tappableActiveRow(flight)
 					}
+				} else {
+					// Busy airspace: hold the section at ~10 rows and scroll.
+					ScrollView {
+						VStack(alignment: .leading, spacing: 8) {
+							ForEach(model.activeFlights) { flight in
+								tappableActiveRow(flight)
+							}
+						}
+						.padding(.vertical, 2)
+					}
+					.frame(height: 320)
 				}
 			} header: {
 				HStack {
 					Text("Active now")
+					if !model.activeFlights.isEmpty {
+						Text("\(model.activeFlights.count)")
+							.foregroundStyle(.secondary)
+					}
 					Spacer()
 					Button {
 						model.requestRecenter()
@@ -224,6 +236,14 @@ struct SidePanel: View {
 				.font(.caption)
 				.multilineTextAlignment(.trailing)
 		}
+	}
+
+	private func tappableActiveRow(_ flight: ActiveFlight) -> some View {
+		activeRow(flight)
+			.frame(maxWidth: .infinity, alignment: .leading)
+			.contentShape(Rectangle())
+			.onTapGesture { model.requestFocus(trackId: flight.id) }
+			.help("Show this aircraft on the map")
 	}
 
 	private func activeRow(_ flight: ActiveFlight) -> some View {
